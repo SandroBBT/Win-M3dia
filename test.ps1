@@ -12,6 +12,19 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $line
 }
 
+# --- Clean test.ps1 encoding (added exactly as requested) ---
+if (Test-Path "C:\Win11Media\test.ps1") {
+    try {
+        Write-Log "Cleaning test.ps1 encoding (removing BOM/hidden bytes)..."
+        (Get-Content "C:\Win11Media\test.ps1") | Set-Content -Encoding UTF8NoBOM "C:\Win11Media\test.ps1"
+        Write-Log "test.ps1 cleaned successfully."
+    } catch {
+        Write-Log "ERROR: Failed to clean test.ps1 - $_"
+    }
+} else {
+    Write-Log "WARNING: test.ps1 not found at C:\Win11Media\test.ps1"
+}
+
 # Ensure running as Administrator
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Host "Not running as Administrator. Elevating..."
@@ -106,4 +119,3 @@ Write-Log "Launching Windows 11 Setup silently..."
 Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning /migratedrivers all" -Wait
 Write-Log "Silent setup finished. Rebooting..."
 Restart-Computer -Force
-

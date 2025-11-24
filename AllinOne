@@ -1,0 +1,209 @@
+# ==============================================
+# Full Script: Windows 11 ISO + SID Fix + Update Cleanup + Bypass Upgrade + Logging
+# ==============================================
+$ErrorActionPreference = "Stop"
+
+# -----------------------------
+# VARIABLES
+# -----------------------------
+$destinationFolder = "C:\Win11Media"
+$PrimaryISO = Join-Path $destinationFolder "Win11_25H2_English_x64.iso"
+$FallbackISO = Join-Path $destinationFolder "Win11_24H2_English_x64.iso"
+$oldISO = $FallbackISO
+
+$isoURL = "https://software.download.prss.microsoft.com/dbazure/Win11_25H2_English_x64.iso?t=2f129268-246f-49d9-ae11-5bb0f0b65aab&P1=1764025989&P2=601&P3=2&P4=K1fLNV1pUuFSUp7nvRH6zcJ8zk34%2fJkYFXyHWof5U4KhT1OtsB%2baIHIoyW2VW3LKpL%2fCNZj5%2bk8A5eSJQwy5ZfYjCosU2DopRxXAPzMIFEmaoqQfNscWX4tICgYkLwnW1FJxxYRz%2b%2fD5avZUPege7FTi7Dc%2fnZ9aPRNw%2bfr7wWES%2byMY1W3NU8xmQCfg%2fk7ERdRLMWNUbtIcEOWKY%2fbCIWvCenRpXuEBlQP4LpVViKhmoFcAXDvauMb6wHKH9UsyBAl0Y%2bIkeFgOQhsVO0jUudgtZnNrnoW%2bxO6VQXXLzczBO18JQNNkq7yGObm92RNgKpJoKrzmQBpN%2bUFmYjOdbQ%3d%3d"
+
+$LogDir = Join-Path $destinationFolder "Logs"
+if (-not (Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory | Out-Null }
+$LogFile = Join-Path $LogDir ("Win11_Upgrade_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+
+function Write-Log {
+    param($Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    Write-Host $line
+    Add-Content -Path $LogFile -Value $line
+}
+
+# -----------------------------
+# ENSURE ADMIN
+# -----------------------------
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Host "Not running as Administrator. Elevating..."
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
+Write-Log "Starting Windows 11 upgrade script."
+
+# -----------------------------
+# STEP 0 — CLEAN OLD ISO
+# -----------------------------
+if (Test-Path $oldISO) {
+    Write-Log "Found old 24H2 ISO — removing..."
+    Remove-Item -Path $oldISO -Force
+    Write-Log "Old 24H2 ISO removed."
+}
+
+# -----------------------------
+# STEP 1 — DOWNLOAD ISO (if missing)
+# -----------------------------
+if (-not (Test-Path $PrimaryISO)) {
+    Write-Log "Downloading Windows 11 25H2 ISO..."
+    try {
+        Invoke-WebRequest -Uri $isoURL -OutFile $PrimaryISO -UseBasicParsing -Verbose:$false
+        Write-Log "✅ Download completed: $PrimaryISO"
+    } catch {
+        Write-Log "❌ Error downloading ISO: $($_.Exception.Message)"
+        exit 1
+    }
+} else {
+    Write-Log "Windows 11 25H2 ISO already exists: $PrimaryISO"
+}
+
+# -----------------------------
+# STEP 2 — CLEAN test.ps1
+# -----------------------------
+$testScript = Join-Path $destinationFolder "test.ps1"
+if (Test-Path $testScript) {
+    try {
+        Write-Log "Cleaning test.ps1 encoding..."
+        (Get-Content $testScript) | Set-Content -Encoding UTF8NoBOM $testScript
+        Write-Log "test.ps1 cleaned successfully."
+    } catch {
+        Write-Log "ERROR cleaning test.ps1: $_"
+    }
+} else {
+    Write-Log "WARNING: test.ps1 not found."
+}
+
+# -----------------------------
+# STEP 3 — RESET WINDOWS UPDATE
+# -----------------------------
+Write-Log "Resetting Windows Update..."
+Stop-Service -Name BITS,wuauserv,appidsvc,cryptsvc -Force -ErrorAction SilentlyContinue
+Rename-Item "$env:systemroot\SoftwareDistribution" "SoftwareDistribution.bak" -ErrorAction SilentlyContinue
+Rename-Item "$env:systemroot\System32\Catroot2" "Catroot2.bak" -ErrorAction SilentlyContinue
+Start-Service -Name BITS,wuauserv,appidsvc,cryptsvc -ErrorAction SilentlyContinue
+Write-Log "Windows Update reset complete."
+
+# -----------------------------
+# STEP 4 — REGISTRY BYPASS TWEAKS
+# -----------------------------
+Write-Log "Applying registry bypass tweaks..."
+$moSetupPath = "HKLM:\SYSTEM\Setup\MoSetup"
+$hwReqChkPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\HwReqChk"
+if (-not (Test-Path $moSetupPath)) { New-Item -Path $moSetupPath -Force | Out-Null }
+if (-not (Test-Path $hwReqChkPath)) { New-Item -Path $hwReqChkPath -Force | Out-Null }
+
+New-ItemProperty -Path $moSetupPath -Name "AllowUpgradesWithUnsupportedTPMOrCPU" -Value 1 -PropertyType DWord -Force
+New-ItemProperty -Path $hwReqChkPath -Name "HwReqChkVars" -PropertyType MultiString -Value @(
+    "SQ_SecureBootCapable=TRUE",
+    "SQ_SecureBootEnabled=TRUE",
+    "SQ_TpmVersion=2",
+    "SQ_RamMB=8192"
+) -Force
+
+reg add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f
+reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f
+reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f
+Write-Log "Registry tweaks applied."
+
+# -----------------------------
+# STEP 5 — WINDOWS UPDATE TARGET RELEASE
+# -----------------------------
+Write-Log "Setting Windows Update target release..."
+$WinUpdatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+if (-not (Test-Path $WinUpdatePath)) { New-Item -Path $WinUpdatePath -Force | Out-Null }
+New-ItemProperty -Path $WinUpdatePath -Name "ProductVersion" -Value "Windows 11" -PropertyType String -Force
+New-ItemProperty -Path $WinUpdatePath -Name "TargetReleaseVersion" -Value 1 -PropertyType DWord -Force
+New-ItemProperty -Path $WinUpdatePath -Name "TargetReleaseVersionInfo" -Value "25H2" -PropertyType String -Force
+Write-Log "Windows Update target release set to 25H2."
+
+# -----------------------------
+# STEP 6 — DUPLICATE SID CLEANUP
+# -----------------------------
+Write-Log "Checking for duplicate SIDs..."
+$CurrentSID = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+$Profiles = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+$DuplicateSIDs = @()
+
+try {
+    $CurrentProfilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$CurrentSID").ProfileImagePath
+} catch {
+    $CurrentProfilePath = $null
+    Write-Log "ERROR: Cannot read current profile path."
+}
+
+if ($CurrentProfilePath) {
+    foreach ($Profile in $Profiles) {
+        $SID = $Profile.PSChildName
+        $Path = (Get-ItemProperty $Profile.PSPath).ProfileImagePath
+        if ($Path -eq $CurrentProfilePath -and $SID -ne $CurrentSID) {
+            $DuplicateSIDs += $SID
+        }
+    }
+}
+
+if ($DuplicateSIDs.Count -gt 0) {
+    foreach ($BadSID in $DuplicateSIDs) {
+        Write-Log "Removing duplicate SID: $BadSID"
+        Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$BadSID" -Recurse -Force
+    }
+    Write-Log "Duplicate SIDs removed."
+} else {
+    Write-Log "No duplicate SIDs found."
+}
+
+# -----------------------------
+# STEP 7 — ISO MOUNT & COPY
+# -----------------------------
+if (Test-Path $PrimaryISO) {
+    $IsoPath = $PrimaryISO
+    Write-Log "Primary ISO found: $PrimaryISO"
+} elseif (Test-Path $FallbackISO) {
+    $IsoPath = $FallbackISO
+    Write-Log "Primary ISO missing — using fallback ISO: $FallbackISO"
+} else {
+    Write-Log "ERROR: No ISO found."
+    exit 1
+}
+
+$TempDir = Join-Path $destinationFolder "Win11Temp"
+if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force }
+New-Item -Path $TempDir -ItemType Directory | Out-Null
+
+Write-Log "Mounting ISO..."
+$mount = Mount-DiskImage -ImagePath $IsoPath -PassThru
+$driveLetter = ($mount | Get-Volume).DriveLetter + ":"
+Write-Log "ISO mounted at $driveLetter"
+Copy-Item -Path "$driveLetter\*" -Destination $TempDir -Recurse -Force
+Dismount-DiskImage -ImagePath $IsoPath
+Write-Log "ISO copied and dismounted."
+
+# -----------------------------
+# STEP 8 — WINDOWS 11 SETUP
+# -----------------------------
+$SetupExe = Join-Path $TempDir "setup.exe"
+if (-not (Test-Path $SetupExe)) { Write-Log "ERROR: setup.exe not found in ISO contents."; exit 1 }
+
+# Unsilent test run
+Write-Log "Launching Windows 11 Setup unsilently..."
+Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning" -Wait
+Write-Log "Test setup finished."
+
+# Silent upgrade
+Write-Log "Launching Windows 11 Setup silently..."
+Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning /migratedrivers all" -Wait
+Write-Log "Silent setup finished."
+
+# -----------------------------
+# STEP 9 — REBOOT IF NEEDED
+# -----------------------------
+$rebootPending = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" -ErrorAction SilentlyContinue
+if (-not $rebootPending) {
+    Write-Log "No pending reboot detected. Rebooting..."
+    Restart-Computer -Force
+} else {
+    Write-Log "A reboot is already pending. Skipping reboot."
+}

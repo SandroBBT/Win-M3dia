@@ -107,42 +107,96 @@ Register-COMComponents
 
 Write-Host "System preparation for Windows 11 upgrade is complete!"
 
-# -----------------------------
-# STEP 0 — CLEAN OLD ISO
-# -----------------------------
-# Removed Fallback ISO and related oldISO variable, so no need to clean it anymore
 
 # -----------------------------
-# STEP 1 — DOWNLOAD ISO (if missing)
+# STEP 1 — DUPLICATE SID CLEANUP
 # -----------------------------
-if (-not (Test-Path $PrimaryISO)) {
-    Write-Log "Downloading Windows 11 25H2 ISO..."
-    try {
-        Invoke-WebRequest -Uri $isoURL -OutFile $PrimaryISO -UseBasicParsing -Verbose:$false
-        Write-Log "✅ Download completed: $PrimaryISO"
-    } catch {
-        Write-Log "❌ Error downloading ISO: $($_.Exception.Message)"
-        exit 1
+Write-Log "Checking for duplicate SIDs..."
+$CurrentSID = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+$Profiles = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+$DuplicateSIDs = @()
+
+try {
+    $CurrentProfilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$CurrentSID").ProfileImagePath
+} catch {
+    $CurrentProfilePath = $null
+    Write-Log "ERROR: Cannot read current profile path."
+}
+
+if ($CurrentProfilePath) {
+    foreach ($Profile in $Profiles) {
+        $SID = $Profile.PSChildName
+        $Path = (Get-ItemProperty $Profile.PSPath).ProfileImagePath
+        if ($Path -eq $CurrentProfilePath -and $SID -ne $CurrentSID) {
+            $DuplicateSIDs += $SID
+        }
     }
+}
+
+if ($DuplicateSIDs.Count -gt 0) {
+    foreach ($BadSID in $DuplicateSIDs) {
+        Write-Log "Removing duplicate SID: $BadSID"
+        Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$BadSID" -Recurse -Force
+    }
+    Write-Log "Duplicate SIDs removed."
 } else {
-    Write-Log "Windows 11 25H2 ISO already exists: $PrimaryISO"
+    Write-Log "No duplicate SIDs found."
 }
 
 # -----------------------------
-# STEP 2 — CLEAN test.ps1
+# STEP 2 — ADVANCED SID REPAIR
 # -----------------------------
-$testScript = Join-Path $destinationFolder "test.ps1"
-if (Test-Path $testScript) {
+Write-Log "Performing advanced SID repair..."
+
+$AllUsers = Get-LocalUser | Select-Object Name, SID
+$ProfileKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+
+foreach ($Key in $ProfileKeys) {
+    $SID = $Key.PSChildName
+
+    # Skip system SIDs
+    if ($SID -in @("S-1-5-18", "S-1-5-19", "S-1-5-20")) { continue }
+
     try {
-        Write-Log "Cleaning test.ps1 encoding..."
-        (Get-Content $testScript) | Set-Content -Encoding UTF8NoBOM $testScript
-        Write-Log "test.ps1 cleaned successfully."
+        $Props = Get-ItemProperty $Key.PSPath
+        $Path  = $Props.ProfileImagePath
     } catch {
-        Write-Log "ERROR cleaning test.ps1: $_"
+        Write-Log "Removing corrupted SID entry: $SID"
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
     }
-} else {
-    Write-Log "WARNING: test.ps1 not found."
+
+    # Missing profile folder
+    if (-not (Test-Path $Path)) {
+        Write-Log "Orphaned SID (folder missing): $SID"
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # Missing NTUSER.DAT
+    if (-not (Test-Path "$Path\NTUSER.DAT")) {
+        Write-Log "Corrupt profile (missing NTUSER.DAT): $SID"
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # Check if user exists
+    if ($AllUsers.SID -notcontains $SID) {
+        Write-Log "Orphaned profile (no matching user account): $SID"
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # .bak fix
+    if ($SID -match "\.bak$") {
+        Write-Log "Repairing .bak SID: $SID"
+        $NewSID = $SID -replace "\.bak$", ""
+        Rename-Item -Path $Key.PSPath -NewName $NewSID -Force
+        Write-Log "✔ Repaired: $NewSID"
+    }
 }
+
+Write-Log "Advanced SID repair complete."
 
 # -----------------------------
 # STEP 3 — RESET WINDOWS UPDATE
@@ -181,12 +235,6 @@ Write-Log "Registry tweaks applied."
 # -----------------------------
 Write-Log "Setting Windows Update target release..."
 $WinUpdatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
-if (-not (Test-Path $WinUpdatePath)) { New
-# -----------------------------
-# STEP 5 — WINDOWS UPDATE TARGET RELEASE
-# -----------------------------
-Write-Log "Setting Windows Update target release..."
-$WinUpdatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
 if (-not (Test-Path $WinUpdatePath)) { New-Item -Path $WinUpdatePath -Force | Out-Null }
 New-ItemProperty -Path $WinUpdatePath -Name "ProductVersion" -Value "Windows 11" -PropertyType String -Force
 New-ItemProperty -Path $WinUpdatePath -Name "TargetReleaseVersion" -Value 1 -PropertyType DWord -Force
@@ -194,42 +242,7 @@ New-ItemProperty -Path $WinUpdatePath -Name "TargetReleaseVersionInfo" -Value "2
 Write-Log "Windows Update target release set to 25H2."
 
 # -----------------------------
-# STEP 6 — DUPLICATE SID CLEANUP
-# -----------------------------
-Write-Log "Checking for duplicate SIDs..."
-$CurrentSID = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
-$Profiles = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
-$DuplicateSIDs = @()
-
-try {
-    $CurrentProfilePath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$CurrentSID").ProfileImagePath
-} catch {
-    $CurrentProfilePath = $null
-    Write-Log "ERROR: Cannot read current profile path."
-}
-
-if ($CurrentProfilePath) {
-    foreach ($Profile in $Profiles) {
-        $SID = $Profile.PSChildName
-        $Path = (Get-ItemProperty $Profile.PSPath).ProfileImagePath
-        if ($Path -eq $CurrentProfilePath -and $SID -ne $CurrentSID) {
-            $DuplicateSIDs += $SID
-        }
-    }
-}
-
-if ($DuplicateSIDs.Count -gt 0) {
-    foreach ($BadSID in $DuplicateSIDs) {
-        Write-Log "Removing duplicate SID: $BadSID"
-        Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$BadSID" -Recurse -Force
-    }
-    Write-Log "Duplicate SIDs removed."
-} else {
-    Write-Log "No duplicate SIDs found."
-}
-
-# -----------------------------
-# STEP 7 — ISO MOUNT & COPY
+# STEP 6 — ISO MOUNT & COPY
 # -----------------------------
 if (Test-Path $PrimaryISO) {
     $IsoPath = $PrimaryISO
@@ -252,7 +265,7 @@ Dismount-DiskImage -ImagePath $IsoPath
 Write-Log "ISO copied and dismounted."
 
 # -----------------------------
-# STEP 8 — WINDOWS 11 SETUP
+# STEP 7 — WINDOWS 11 SETUP
 # -----------------------------
 $SetupExe = Join-Path $TempDir "setup.exe"
 if (-not (Test-Path $SetupExe)) { Write-Log "ERROR: setup.exe not found in ISO contents."; exit 1 }
@@ -268,7 +281,7 @@ Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot 
 Write-Log "Silent setup finished."
 
 # -----------------------------
-# STEP 9 — REBOOT IF NEEDED
+# STEP 8 — REBOOT IF NEEDED
 # -----------------------------
 $rebootPending = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending" -ErrorAction SilentlyContinue
 if (-not $rebootPending) {

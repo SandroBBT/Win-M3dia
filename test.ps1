@@ -1,6 +1,6 @@
-# ==============================================
+# ================================================================
 # Full Script: Windows 11 ISO + Duplicate SID Fix + Update Cleanup + Bypass Upgrade + Logging
-# ==============================================
+# ================================================================
 $ErrorActionPreference = "Stop"
 
 # -----------------------------
@@ -64,7 +64,64 @@ if ($DuplicateSIDs.Count -eq 0) {
 }
 
 # -----------------------------
-# STEP 2 — RESET WINDOWS UPDATE
+# STEP 2 — ADVANCED SID & PROFILE REPAIR
+# -----------------------------
+Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "=== Advanced SID Repair Module ===" -ForegroundColor Cyan
+Write-Host "======================================" -ForegroundColor Cyan
+
+$AllUsers    = Get-LocalUser | Select-Object Name, SID
+$ProfileKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+
+foreach ($Key in $ProfileKeys) {
+    $SID = $Key.PSChildName
+
+    # Skip system SIDs
+    if ($SID -in @("S-1-5-18", "S-1-5-19", "S-1-5-20")) { continue }
+
+    try {
+        $Props = Get-ItemProperty $Key.PSPath
+        $Path  = $Props.ProfileImagePath
+    } catch {
+        Write-Host "Removing corrupted SID entry: $SID" -ForegroundColor Yellow
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # Missing profile folder
+    if (-not (Test-Path $Path)) {
+        Write-Host "Orphaned SID (folder missing): $SID" -ForegroundColor Red
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # Missing NTUSER.DAT
+    if (-not (Test-Path "$Path\NTUSER.DAT")) {
+        Write-Host "Corrupt profile (missing NTUSER.DAT): $SID" -ForegroundColor Red
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # Check if user exists
+    if ($AllUsers.SID -notcontains $SID) {
+        Write-Host "Orphaned profile (no matching user account): $SID" -ForegroundColor Red
+        Remove-Item $Key.PSPath -Recurse -Force
+        continue
+    }
+
+    # .bak fix
+    if ($SID -match "\.bak$") {
+        Write-Host "Repairing .bak SID: $SID" -ForegroundColor Yellow
+        $NewSID = $SID -replace "\.bak$", ""
+        Rename-Item -Path $Key.PSPath -NewName $NewSID -Force
+        Write-Host "✔ Repaired: $NewSID" -ForegroundColor Green
+    }
+}
+
+Write-Host "✔ Advanced SID repair complete." -ForegroundColor Green
+
+# -----------------------------
+# STEP 3 — RESET WINDOWS UPDATE
 # -----------------------------
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "=== Resetting Windows Update System ===" -ForegroundColor Cyan
@@ -84,7 +141,7 @@ Start-Service bits -ErrorAction SilentlyContinue
 Write-Log "Windows Update cache cleared."
 
 # -----------------------------
-# STEP 3 — ENSURE ADMIN
+# STEP 4 — ENSURE ADMIN
 # -----------------------------
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Host "Not running as Administrator. Elevating..."
@@ -95,9 +152,9 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 Write-Log "Starting Windows 11 upgrade script."
 
 # -----------------------------
-# STEP 4 — APPLY REGISTRY BYPASS TWEAKS
+# STEP 5 — APPLY REGISTRY BYPASS TWEAKS
 # -----------------------------
-Write-Log "Step 4: Applying registry bypass tweaks..."
+Write-Log "Step 5: Applying registry bypass tweaks..."
 
 $moSetupPath = "HKLM:\SYSTEM\Setup\MoSetup"
 $hwReqChkPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\HwReqChk"
@@ -115,9 +172,9 @@ New-ItemProperty -Path $hwReqChkPath -Name "HwReqChkVars" -PropertyType MultiStr
 Write-Log "Registry tweaks applied."
 
 # -----------------------------
-# STEP 5 — SET WINDOWS UPDATE TARGET RELEASE
+# STEP 6 — SET WINDOWS UPDATE TARGET RELEASE
 # -----------------------------
-Write-Log "Step 5: Setting Windows Update target release to 24H2..."
+Write-Log "Step 6: Setting Windows Update target release to 24H2..."
 
 $WinUpdatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
 if (-not (Test-Path $WinUpdatePath)) { New-Item -Path $WinUpdatePath -Force | Out-Null }
@@ -129,7 +186,7 @@ New-ItemProperty -Path $WinUpdatePath -Name "TargetReleaseVersionInfo" -Value "2
 Write-Log "Windows Update target release set to 24H2."
 
 # -----------------------------
-# STEP 6 — ISO MOUNT & COPY
+# STEP 7 — ISO MOUNT & COPY
 # -----------------------------
 $PrimaryISO  = "C:\Win11Media\Win11_25H2_English_x64.iso"
 $TempDir = "C:\Win11Media\Win11Temp"
@@ -147,7 +204,7 @@ Dismount-DiskImage -ImagePath $PrimaryISO
 Write-Log "ISO copied and dismounted."
 
 # -----------------------------
-# STEP 7 — WINDOWS 11 SETUP
+# STEP 8 — WINDOWS 11 SETUP
 # -----------------------------
 $SetupExe = Join-Path $TempDir "setup.exe"
 if (-not (Test-Path $SetupExe)) {
@@ -169,3 +226,6 @@ Write-Log "Launching Windows 11 Setup silently..."
 Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning /migratedrivers all" -Wait
 
 Write-Log "Silent setup finished."
+
+Write-Log "Windows 11 upgrade process completed."
+

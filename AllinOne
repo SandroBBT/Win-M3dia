@@ -1,4 +1,4 @@
-# ==============================================
+#============================================== 
 # Full Script: Windows 11 ISO + SID Fix + Update Cleanup + Bypass Upgrade + Logging
 # ==============================================
 $ErrorActionPreference = "Stop"
@@ -8,8 +8,6 @@ $ErrorActionPreference = "Stop"
 # -----------------------------
 $destinationFolder = "C:\Win11Media"
 $PrimaryISO = Join-Path $destinationFolder "Win11_25H2_English_x64.iso"
-$FallbackISO = Join-Path $destinationFolder "Win11_24H2_English_x64.iso"
-$oldISO = $FallbackISO
 
 $isoURL = "https://software.download.prss.microsoft.com/dbazure/Win11_25H2_English_x64.iso?t=2f129268-246f-49d9-ae11-5bb0f0b65aab&P1=1764025989&P2=601&P3=2&P4=K1fLNV1pUuFSUp7nvRH6zcJ8zk34%2fJkYFXyHWof5U4KhT1OtsB%2baIHIoyW2VW3LKpL%2fCNZj5%2bk8A5eSJQwy5ZfYjCosU2DopRxXAPzMIFEmaoqQfNscWX4tICgYkLwnW1FJxxYRz%2b%2fD5avZUPege7FTi7Dc%2fnZ9aPRNw%2bfr7wWES%2byMY1W3NU8xmQCfg%2fk7ERdRLMWNUbtIcEOWKY%2fbCIWvCenRpXuEBlQP4LpVViKhmoFcAXDvauMb6wHKH9UsyBAl0Y%2bIkeFgOQhsVO0jUudgtZnNrnoW%2bxO6VQXXLzczBO18JQNNkq7yGObm92RNgKpJoKrzmQBpN%2bUFmYjOdbQ%3d%3d"
 
@@ -34,16 +32,109 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
-Write-Log "Starting Windows 11 upgrade script."
+# =================================================================
+# ADDED BLOCK — WINDOWS 10 / WINDOWS 11 DETECTION (NO OTHER CHANGES)
+# =================================================================
+$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+$ProductName = (Get-ItemProperty -Path $regPath -Name ProductName).ProductName
+
+Write-Host "`nDetected OS: $ProductName"
+
+if ($ProductName -match "Windows 11") {
+    Write-Host "System is already Windows 11 — upgrade script will continue." -ForegroundColor Green
+    $WindowsVersion = "11"
+}
+elseif ($ProductName -match "Windows 10") {
+    Write-Host "System is Windows 10 — upgrade script will continue." -ForegroundColor Yellow
+    $WindowsVersion = "10"
+}
+else {
+    Write-Host "Unknown Windows version. Script will continue anyway." -ForegroundColor Red
+    $WindowsVersion = "Unknown"
+}
+# =================================================================
+# END ADDED BLOCK
+# =================================================================
+
+# ============================
+# Windows 11 Troubleshooting Functions
+# ============================
+
+# Function to check available disk space
+function Check-DiskSpace {
+    Write-Host "Checking for sufficient disk space..."
+    $disk = Get-PSDrive -Name C
+    $freeSpaceGB = [math]::round($disk.Free/1GB, 2)
+    $totalSpaceGB = [math]::round($disk.Used/1GB + $freeSpaceGB, 2)
+
+    Write-Host "Total Disk Space: $totalSpaceGB GB"
+    Write-Host "Free Disk Space: $freeSpaceGB GB"
+
+    if ($freeSpaceGB -lt 64) {
+        Write-Host "Warning: You need at least 64 GB of free disk space for the upgrade."
+    } else {
+        Write-Host "Disk space is sufficient for the upgrade."
+    }
+}
+
+# Function to run System File Checker (SFC)
+function Run-SFC {
+    Write-Host "Running System File Checker (sfc /scannow)..."
+    sfc /scannow
+}
+
+# Function to run DISM
+function Run-DISM {
+    Write-Host "Running DISM to repair Windows image..."
+    DISM /Online /Cleanup-Image /RestoreHealth
+}
+
+# Function to clear Windows Update cache
+function Clear-WindowsUpdateCache {
+    Write-Host "Stopping Windows Update service..."
+    Stop-Service -Name wuauserv -Force
+
+    Write-Host "Clearing Windows Update cache..."
+    Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force
+    Remove-Item -Path "C:\Windows\SoftwareDistribution\DataStore\*" -Recurse -Force
+
+    Write-Host "Starting Windows Update service..."
+    Start-Service -Name wuauserv
+}
+
+# Function to re-register COM components
+function Register-COMComponents {
+    Write-Host "Re-registering COM components (if needed)..."
+    regsvr32 /s ole32.dll
+    regsvr32 /s oleaut32.dll
+    regsvr32 /s msxml3.dll
+    regsvr32 /s msxml6.dll
+}
+
+# Run the troubleshooting steps
+Write-Host "Starting Windows 11 upgrade preparation..."
+
+# Check Disk Space
+Check-DiskSpace
+
+# Run System File Checker
+Run-SFC
+
+# Run DISM to repair the image
+Run-DISM
+
+# Clear Windows Update cache
+Clear-WindowsUpdateCache
+
+# Re-register COM components
+Register-COMComponents
+
+Write-Host "System preparation for Windows 11 upgrade is complete!"
 
 # -----------------------------
 # STEP 0 — CLEAN OLD ISO
 # -----------------------------
-if (Test-Path $oldISO) {
-    Write-Log "Found old 24H2 ISO — removing..."
-    Remove-Item -Path $oldISO -Force
-    Write-Log "Old 24H2 ISO removed."
-}
+# Removed Fallback ISO and related oldISO variable, so no need to clean it anymore
 
 # -----------------------------
 # STEP 1 — DOWNLOAD ISO (if missing)
@@ -89,6 +180,17 @@ Write-Log "Windows Update reset complete."
 
 # -----------------------------
 # STEP 4 — REGISTRY BYPASS TWEAKS
+# -----------------------------
+Write-Log "Applying registry bypass tweaks..."
+$moSetupPath = "HKLM:\SYSTEM\Setup\MoSetup"
+$hwReqChkPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\HwReqChk"
+if (-not (Test-Path $moSetupPath)) { New-Item -Path $moSetupPath -Force | Out-Null }
+if (-not (Test-Path $hwReqChkPath)) { New-Item -Path $hwReqChkPath -Force | Out-Null }
+
+New-ItemProperty -Path $moSetupPath -Name "AllowUpgradesWithUnsupportedTPMOrCPU" -Value 1 -PropertyType DWord -Force
+New-ItemProperty -Path $hwReqChkPath -Name "HwReqChkVars" -PropertyType Multi
+# -----------------------------
+# STEP 4 — REGISTRY BYPASS TWEAKS (continued)
 # -----------------------------
 Write-Log "Applying registry bypass tweaks..."
 $moSetupPath = "HKLM:\SYSTEM\Setup\MoSetup"
@@ -161,9 +263,6 @@ if ($DuplicateSIDs.Count -gt 0) {
 if (Test-Path $PrimaryISO) {
     $IsoPath = $PrimaryISO
     Write-Log "Primary ISO found: $PrimaryISO"
-} elseif (Test-Path $FallbackISO) {
-    $IsoPath = $FallbackISO
-    Write-Log "Primary ISO missing — using fallback ISO: $FallbackISO"
 } else {
     Write-Log "ERROR: No ISO found."
     exit 1

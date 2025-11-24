@@ -32,30 +32,6 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
-# =================================================================
-# ADDED BLOCK — WINDOWS 10 / WINDOWS 11 DETECTION (NO OTHER CHANGES)
-# =================================================================
-$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-$ProductName = (Get-ItemProperty -Path $regPath -Name ProductName).ProductName
-
-Write-Host "`nDetected OS: $ProductName"
-
-if ($ProductName -match "Windows 11") {
-    Write-Host "System is already Windows 11 — upgrade script will continue." -ForegroundColor Green
-    $WindowsVersion = "11"
-}
-elseif ($ProductName -match "Windows 10") {
-    Write-Host "System is Windows 10 — upgrade script will continue." -ForegroundColor Yellow
-    $WindowsVersion = "10"
-}
-else {
-    Write-Host "Unknown Windows version. Script will continue anyway." -ForegroundColor Red
-    $WindowsVersion = "Unknown"
-}
-# =================================================================
-# END ADDED BLOCK
-# =================================================================
-
 # ============================
 # Windows 11 Troubleshooting Functions
 # ============================
@@ -188,17 +164,6 @@ if (-not (Test-Path $moSetupPath)) { New-Item -Path $moSetupPath -Force | Out-Nu
 if (-not (Test-Path $hwReqChkPath)) { New-Item -Path $hwReqChkPath -Force | Out-Null }
 
 New-ItemProperty -Path $moSetupPath -Name "AllowUpgradesWithUnsupportedTPMOrCPU" -Value 1 -PropertyType DWord -Force
-New-ItemProperty -Path $hwReqChkPath -Name "HwReqChkVars" -PropertyType Multi
-# -----------------------------
-# STEP 4 — REGISTRY BYPASS TWEAKS (continued)
-# -----------------------------
-Write-Log "Applying registry bypass tweaks..."
-$moSetupPath = "HKLM:\SYSTEM\Setup\MoSetup"
-$hwReqChkPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\HwReqChk"
-if (-not (Test-Path $moSetupPath)) { New-Item -Path $moSetupPath -Force | Out-Null }
-if (-not (Test-Path $hwReqChkPath)) { New-Item -Path $hwReqChkPath -Force | Out-Null }
-
-New-ItemProperty -Path $moSetupPath -Name "AllowUpgradesWithUnsupportedTPMOrCPU" -Value 1 -PropertyType DWord -Force
 New-ItemProperty -Path $hwReqChkPath -Name "HwReqChkVars" -PropertyType MultiString -Value @(
     "SQ_SecureBootCapable=TRUE",
     "SQ_SecureBootEnabled=TRUE",
@@ -211,6 +176,12 @@ reg add HKLM\SYSTEM\Setup\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /
 reg add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f
 Write-Log "Registry tweaks applied."
 
+# -----------------------------
+# STEP 5 — WINDOWS UPDATE TARGET RELEASE
+# -----------------------------
+Write-Log "Setting Windows Update target release..."
+$WinUpdatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+if (-not (Test-Path $WinUpdatePath)) { New
 # -----------------------------
 # STEP 5 — WINDOWS UPDATE TARGET RELEASE
 # -----------------------------

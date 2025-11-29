@@ -48,7 +48,6 @@ try {
 if ($CurrentProfilePath) {
     foreach ($Profile in $Profiles) {
         $SID = $Profile.PSChildName
-        # Protect active user
         if ($SID -eq $CurrentSID) { continue }
 
         $Path = (Get-ItemProperty $Profile.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
@@ -67,8 +66,7 @@ if ($DuplicateSIDs.Count -eq 0) {
     foreach ($BadSID in $DuplicateSIDs) {
         Write-Host "Removing duplicate SID registry key: $BadSID" -ForegroundColor Yellow
         Write-Log "Removing duplicate SID registry key: $BadSID"
-        # Extra safety: ensure not system/service SID pattern and not current user (already checked)
-        if ($BadSID -notmatch "^(S-1-5-18|S-1-5-19|S-1-5-20|S-1-5-80-)" ) {
+        if ($BadSID -notmatch "^(S-1-5-18|S-1-5-19|S-1-5-20|S-1-5-80-)") {
             Remove-Item "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$BadSID" -Recurse -Force -ErrorAction SilentlyContinue
         } else {
             Write-Log "Skipped removing system/service SID: $BadSID"
@@ -80,86 +78,50 @@ if ($DuplicateSIDs.Count -eq 0) {
 
 # -----------------------------
 # STEP 2 — ADVANCED SID & PROFILE REPAIR (SAFE)
-# Only operate on REAL user SIDs; skip service/virtual/system SIDs; never touch current SID
 # -----------------------------
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "=== Advanced SID Repair Module (safe) ===" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
 
-# Get local user SIDs
 $LocalUsers = @()
 try { $LocalUsers = Get-LocalUser | Select-Object -ExpandProperty SID -ErrorAction SilentlyContinue } catch {}
-# Try to get AD users if AD module available (non-fatal if missing)
 $DomainUsers = @()
 try {
     Import-Module ActiveDirectory -ErrorAction SilentlyContinue
     $DomainUsers = Get-ADUser -Filter * -Properties SID | Select-Object -ExpandProperty SID -ErrorAction SilentlyContinue
-} catch {
-    $DomainUsers = @()
-}
+} catch { $DomainUsers = @() }
 
 $ValidUserSIDs = @()
 if ($LocalUsers) { $ValidUserSIDs += $LocalUsers }
 if ($DomainUsers) { $ValidUserSIDs += $DomainUsers }
 
-# Re-read profile keys
 $ProfileKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
 
 foreach ($Key in $ProfileKeys) {
     $SID = $Key.PSChildName
 
-    # PROTECTION: skip the active user always
-    if ($SID -eq $CurrentSID) {
-        Write-Host "Skipping active user SID: $SID" -ForegroundColor Cyan
-        continue
-    }
+    if ($SID -eq $CurrentSID) { continue }
+    if ($SID -in @("S-1-5-18","S-1-5-19","S-1-5-20")) { Write-Log "Skipping system SID: $SID"; continue }
+    if ($SID -like "S-1-5-21-*-500" -or $SID -like "S-1-5-21-*-501") { Write-Log "Skipping built-in admin/guest SID pattern: $SID"; continue }
+    if ($SID -like "S-1-5-80-*") { Write-Log "Skipping service/virtual SID: $SID"; continue }
 
-    # Skip well-known system/service/virtual SIDs
-    if ($SID -in @("S-1-5-18","S-1-5-19","S-1-5-20")) {
-        Write-Log "Skipping system SID: $SID"
-        continue
-    }
-    if ($SID -like "S-1-5-21-*-500" -or $SID -like "S-1-5-21-*-501") {
-        # skip built-in admin/guest patterns
-        Write-Log "Skipping built-in admin/guest SID pattern: $SID"
-        continue
-    }
-    if ($SID -like "S-1-5-80-*") {
-        # virtual/service account SIDs
-        Write-Log "Skipping service/virtual SID: $SID"
-        continue
-    }
-
-    # Attempt to read ProfileImagePath; if cannot, skip (avoid removing service keys)
     $Props = $null
-    try {
-        $Props = Get-ItemProperty $Key.PSPath -ErrorAction Stop
-    } catch {
-        Write-Log "Cannot read profile key properties for $SID — skipping."
-        continue
-    }
-
+    try { $Props = Get-ItemProperty $Key.PSPath -ErrorAction Stop } catch { Write-Log "Cannot read profile key properties for $SID — skipping."; continue }
     $Path = $Props.ProfileImagePath
+    if (-not $Path) { Write-Log "Profile key $SID has no ProfileImagePath — skipping."; continue }
 
-    # If no path recorded, skip (do not delete blindly)
-    if (-not $Path) {
-        Write-Log "Profile key $SID has no ProfileImagePath — skipping."
-        continue
-    }
-
-    # If this is a .bak key (user profile backup), attempt safe repair
     if ($SID -match "\.bak$") {
         Write-Host "Repairing .bak SID: $SID" -ForegroundColor Yellow
         Write-Log "Repairing .bak SID: $SID"
         $NewSID = $SID -replace "\.bak$", ""
-        # Ensure we won't overwrite the active SID
         if ($NewSID -ne $CurrentSID) {
             try {
                 Rename-Item -Path $Key.PSPath -NewName $NewSID -Force -ErrorAction Stop
                 Write-Host "✔ Repaired: $NewSID" -ForegroundColor Green
                 Write-Log "Repaired .bak -> $NewSID"
             } catch {
-                Write-Log "Failed to rename $SID to $NewSID: $($_.Exception.Message)"
+                $exMsg = $_.Exception.Message
+                Write-Log ("Failed to rename " + $SID + " to " + $NewSID + ": " + $exMsg)
             }
         } else {
             Write-Log "Refused .bak rename because target equals current SID: $NewSID"
@@ -167,11 +129,9 @@ foreach ($Key in $ProfileKeys) {
         continue
     }
 
-    # If profile folder is missing -> safe orphan removal
     if (-not (Test-Path $Path)) {
         Write-Host "Orphaned SID (folder missing): $SID" -ForegroundColor Red
         Write-Log "Orphaned SID (folder missing): $SID - removing registry key"
-        # Only remove if SID is not a known service/system pattern
         if ($SID -notmatch "^(S-1-5-18|S-1-5-19|S-1-5-20|S-1-5-80-)") {
             Remove-Item $Key.PSPath -Recurse -Force -ErrorAction SilentlyContinue
         } else {
@@ -180,7 +140,6 @@ foreach ($Key in $ProfileKeys) {
         continue
     }
 
-    # If folder exists but NTUSER.DAT missing -> only remove if SID maps to a real user
     $NtUser = Join-Path $Path "NTUSER.DAT"
     if (-not (Test-Path $NtUser)) {
         if ($ValidUserSIDs -contains $SID) {
@@ -193,11 +152,8 @@ foreach ($Key in $ProfileKeys) {
         continue
     }
 
-    # Additional safety: deduplicate registry entries pointing to same folder
     $Matching = $ProfileKeys | Where-Object {
-        try {
-            (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath -eq $Path
-        } catch { $false }
+        try { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath -eq $Path } catch { $false }
     }
 
     if ($Matching.Count -gt 1) {
@@ -218,28 +174,14 @@ Write-Log "Advanced SID repair complete."
 # -----------------------------
 # STEP 3 — RESET WINDOWS UPDATE
 # -----------------------------
-Write-Host "======================================" -ForegroundColor Cyan
-Write-Host "=== Resetting Windows Update System ===" -ForegroundColor Cyan
-Write-Host "======================================" -ForegroundColor Cyan
-
 Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
 Stop-Service bits -Force -ErrorAction SilentlyContinue
-
-# Clear SoftwareDistribution safely (delete files in Download and DataStore only)
 try {
     Remove-Item -Path "C:\Windows\SoftwareDistribution\Download\*" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path "C:\Windows\SoftwareDistribution\DataStore\*" -Recurse -Force -ErrorAction SilentlyContinue
     Write-Log "Cleared SoftwareDistribution Download and DataStore."
-} catch {
-    Write-Log "Failed to fully clear SoftwareDistribution: $($_.Exception.Message)"
-}
-
-if (Test-Path "C:\$WINDOWS.~BT") {
-    Write-Log "Removing C:\$WINDOWS.~BT folder..."
-    Remove-Item -Path "C:\$WINDOWS.~BT" -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Log "Removed C:\$WINDOWS.~BT"
-}
-
+} catch { Write-Log ("Failed to fully clear SoftwareDistribution: " + $_.Exception.Message) }
+if (Test-Path "C:\$WINDOWS.~BT") { Remove-Item -Path "C:\$WINDOWS.~BT" -Recurse -Force -ErrorAction SilentlyContinue; Write-Log "Removed C:\$WINDOWS.~BT" }
 Start-Service wuauserv -ErrorAction SilentlyContinue
 Start-Service bits -ErrorAction SilentlyContinue
 Write-Log "Windows Update cache cleared."
@@ -252,8 +194,6 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
-
-Write-Log "Starting Windows 11 upgrade script."
 
 # -----------------------------
 # STEP 5 — APPLY REGISTRY BYPASS TWEAKS
@@ -328,6 +268,10 @@ Write-Log "Test setup finished."
 # -----------------------------
 Write-Log "Launching Windows 11 Setup silently..."
 Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning /migratedrivers all" -Wait
+
+Write-Log "Silent setup finished."
+
+Write-Log "Windows 11 upgrade process completed."
 
 Write-Log "Silent setup finished."
 

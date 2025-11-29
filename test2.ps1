@@ -322,3 +322,13 @@ if (-not (Test-Path $SetupExe)) {
 Write-Log "Launching Windows 11 Setup unsilently for testing..."
 Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning" -Wait
 Write-Log "Test setup finished."
+
+# -----------------------------
+# Silent final run
+# -----------------------------
+Write-Log "Launching Windows 11 Setup silently..."
+Start-Process -FilePath $SetupExe -ArgumentList "/auto upgrade /quiet /noreboot /showoobe none /eula accept /dynamicupdate enable /compat ignorewarning /migratedrivers all" -Wait
+
+Write-Log "Silent setup finished."
+
+Write-Log "Windows 11 upgrade process completed."
